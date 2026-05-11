@@ -1,0 +1,1159 @@
+import React, { useState, useMemo, useEffect } from 'react';
+import { 
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer,
+  PieChart, Pie, Cell
+} from 'recharts';
+import { 
+  LayoutDashboard, FileText, PlusCircle, LogOut, Download, Printer, 
+  Search, Upload, Bell, UserCircle, Settings, FileSpreadsheet, Edit, X, Trash2, Users
+} from 'lucide-react';
+
+// --- FIREBASE IMPORTS ---
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, doc, setDoc, onSnapshot, updateDoc, deleteDoc } from 'firebase/firestore';
+
+// --- FIREBASE INITIALIZATION ---
+// Initialize outside component to prevent re-initialization
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8'];
+
+export default function App() {
+  const [firebaseUser, setFirebaseUser] = useState(null); // For Firebase Auth
+  const [appUser, setAppUser] = useState(null);           // For Application Role (Admin/Maker)
+  const [activeMenu, setActiveMenu] = useState('dashboard');
+  
+  // Data States (Now fetched from Firebase)
+  const [budgets, setBudgets] = useState([]);
+  const [transactions, setTransactions] = useState([]);
+  const [usersList, setUsersList] = useState([]); // New state for User Management
+  const [isDataLoaded, setIsDataLoaded] = useState(false);
+
+  // --- 1. FIREBASE AUTHENTICATION EFFECT ---
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Firebase Auth Error:", error);
+      }
+    };
+    initAuth();
+
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setFirebaseUser(user);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // --- 2. FIREBASE REALTIME DATA LISTENER EFFECT ---
+  useEffect(() => {
+    if (!firebaseUser) return; // Guard: Wait for Firebase Auth
+
+    // References to public collections for collaborative app
+    const budgetsCol = collection(db, 'artifacts', appId, 'public', 'data', 'budgets');
+    const transactionsCol = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
+    const usersCol = collection(db, 'artifacts', appId, 'public', 'data', 'users');
+
+    // Listen to Budgets
+    const unsubBudgets = onSnapshot(
+      budgetsCol,
+      (snapshot) => {
+        const budgetsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setBudgets(budgetsData);
+      },
+      (error) => console.error("Error fetching budgets:", error)
+    );
+
+    // Listen to Transactions
+    const unsubTransactions = onSnapshot(
+      transactionsCol,
+      (snapshot) => {
+        const txData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setTransactions(txData);
+        setIsDataLoaded(true); // Mark as loaded when transactions are ready
+      },
+      (error) => console.error("Error fetching transactions:", error)
+    );
+
+    // Listen to Users
+    const unsubUsers = onSnapshot(
+      usersCol,
+      (snapshot) => {
+        const uData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setUsersList(uData);
+      },
+      (error) => console.error("Error fetching users:", error)
+    );
+
+    return () => {
+      unsubBudgets();
+      unsubTransactions();
+      unsubUsers();
+    };
+  }, [firebaseUser]);
+
+  // Authentication Mock for Roles
+  const handleLogin = (e) => {
+    e.preventDefault();
+    const email = e.target.email.value;
+    const password = e.target.password.value;
+    
+    if (email && password) {
+      // ตรวจสอบว่าต้องเป็นอีเมลของ กปภ. เท่านั้น
+      if (!email.endsWith('@pwa.co.th')) {
+        alert('กรุณาเข้าสู่ระบบด้วยอีเมลขององค์กร (@pwa.co.th) เท่านั้น');
+        return;
+      }
+
+      // Fallback Admin
+      if (email === 'admin@pwa.co.th') {
+        const foundAdmin = usersList.find(u => u.email === email);
+        setAppUser({ 
+          email, 
+          role: foundAdmin ? foundAdmin.role : 'ADMIN', 
+          name: foundAdmin ? foundAdmin.name : 'Admin (Default)' 
+        });
+        return;
+      }
+
+      // Check DB Users
+      const foundUser = usersList.find(u => u.email === email);
+      if (foundUser) {
+        setAppUser({ email: foundUser.email, role: foundUser.role, name: foundUser.name });
+      } else {
+        alert('อีเมลนี้ไม่มีสิทธิ์เข้าใช้งานระบบ โปรดติดต่อผู้ดูแลระบบ');
+      }
+    }
+  };
+
+  const handleLogout = () => setAppUser(null);
+
+  // CSV Export Function (supports Thai via BOM)
+  const exportToCSV = (data, filename) => {
+    const csvContent = "data:text/csv;charset=utf-8,\uFEFF" 
+      + data.map(e => e.join(",")).join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `${filename}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Notification Mock
+  const sendLineNotify = () => {
+    alert('ส่งข้อความแจ้งเตือนผ่าน Line Notify ไปยังกลุ่ม "กปภ.สาขาละหานทราย" เรียบร้อยแล้ว (จำลอง)');
+  };
+
+  if (!appUser) {
+    return <LoginScreen onLogin={handleLogin} isFirebaseReady={!!firebaseUser} />;
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex font-sans text-slate-800">
+      {/* Sidebar */}
+      <aside className="w-64 bg-blue-900 text-white flex flex-col print:hidden shadow-xl z-10">
+        <div className="p-5 border-b border-blue-800 flex items-center space-x-3">
+          <div className="w-10 h-10 bg-white rounded-full flex items-center justify-center text-blue-900 font-bold text-xl">
+            กปภ.
+          </div>
+          <div>
+            <h1 className="font-bold text-lg leading-tight">ทะเบียนคุมงบ</h1>
+            <p className="text-xs text-blue-300">สาขาละหานทราย</p>
+          </div>
+        </div>
+        
+        <nav className="flex-1 py-4">
+          <MenuButton icon={<LayoutDashboard size={20}/>} label="แดชบอร์ด (Overview)" active={activeMenu === 'dashboard'} onClick={() => setActiveMenu('dashboard')} />
+          {appUser.role === 'ADMIN' && (
+            <>
+              <MenuButton icon={<Settings size={20}/>} label="ตั้งค่าฐานข้อมูล & อัพโหลด" active={activeMenu === 'setup'} onClick={() => setActiveMenu('setup')} />
+              <MenuButton icon={<Users size={20}/>} label="จัดการสิทธิ์การใช้งาน" active={activeMenu === 'users'} onClick={() => setActiveMenu('users')} />
+            </>
+          )}
+          <MenuButton icon={<PlusCircle size={20}/>} label="บันทึก รับ-จ่าย" active={activeMenu === 'entry'} onClick={() => setActiveMenu('entry')} />
+          <MenuButton icon={<FileText size={20}/>} label="รายงาน (Reports)" active={activeMenu === 'reports'} onClick={() => setActiveMenu('reports')} />
+        </nav>
+
+        <div className="p-4 border-t border-blue-800 bg-blue-950">
+          <div className="flex items-center space-x-3 mb-4">
+            <UserCircle size={32} className="text-blue-300" />
+            <div>
+              <p className="text-sm font-semibold truncate">{appUser.name}</p>
+              <p className="text-xs text-blue-400">{appUser.role === 'ADMIN' ? 'ผู้ดูแลระบบ' : 'ผู้จัดทำ'}</p>
+            </div>
+          </div>
+          <button onClick={handleLogout} className="w-full flex items-center justify-center space-x-2 text-sm text-red-300 hover:text-red-100 transition-colors">
+            <LogOut size={16} /> <span>ออกจากระบบ</span>
+          </button>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <main className="flex-1 flex flex-col h-screen overflow-hidden">
+        {/* Header */}
+        <header className="bg-white shadow-sm px-8 py-4 flex justify-between items-center print:hidden z-0">
+          <h2 className="text-xl font-bold text-slate-700">
+            {activeMenu === 'dashboard' && 'แดชบอร์ดสรุปภาพรวมงบประมาณ'}
+            {activeMenu === 'setup' && 'จัดการฐานข้อมูลศูนย์ต้นทุนและรหัสงบ'}
+            {activeMenu === 'users' && 'จัดการสิทธิ์การใช้งานระบบ'}
+            {activeMenu === 'entry' && 'บันทึกข้อมูลการ รับ-จ่าย ตัดงบประมาณ'}
+            {activeMenu === 'reports' && 'ระบบรายงานและการส่งออกข้อมูล'}
+          </h2>
+          <div className="flex space-x-3 items-center">
+            {/* Database Status Indicator */}
+            <div className="flex items-center space-x-2 mr-4">
+              <span className={`w-3 h-3 rounded-full ${firebaseUser ? 'bg-green-500' : 'bg-red-500'} animate-pulse`}></span>
+              <span className="text-xs text-slate-500">{firebaseUser ? 'เชื่อมต่อฐานข้อมูลแล้ว' : 'กำลังเชื่อมต่อ...'}</span>
+            </div>
+            <button onClick={sendLineNotify} className="flex items-center space-x-2 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 shadow-sm transition-all text-sm font-medium">
+              <Bell size={16} />
+              <span>แจ้งเตือน Line</span>
+            </button>
+          </div>
+        </header>
+
+        {/* Scrollable Content Area */}
+        <div className="flex-1 overflow-auto p-8 relative">
+          {!isDataLoaded ? (
+            <div className="flex items-center justify-center h-full text-slate-500">
+              กำลังโหลดข้อมูลจากฐานข้อมูล...
+            </div>
+          ) : (
+            <>
+              {activeMenu === 'dashboard' && <Dashboard budgets={budgets} transactions={transactions} />}
+              {activeMenu === 'setup' && <BudgetSetup budgets={budgets} firebaseUser={firebaseUser} appUser={appUser} />}
+              {activeMenu === 'users' && <UserManagement usersList={usersList} firebaseUser={firebaseUser} appUser={appUser} />}
+              {activeMenu === 'entry' && <TransactionEntry budgets={budgets} transactions={transactions} firebaseUser={firebaseUser} appUser={appUser} />}
+              {activeMenu === 'reports' && <Reports budgets={budgets} transactions={transactions} exportToCSV={exportToCSV} />}
+            </>
+          )}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+// --- SUB COMPONENTS ---
+
+const MenuButton = ({ icon, label, active, onClick }) => (
+  <button 
+    onClick={onClick}
+    className={`w-full flex items-center space-x-3 px-6 py-3 text-sm transition-colors ${
+      active ? 'bg-blue-800 text-white border-l-4 border-yellow-400' : 'text-blue-200 hover:bg-blue-800 hover:text-white border-l-4 border-transparent'
+    }`}
+  >
+    {icon}
+    <span>{label}</span>
+  </button>
+);
+
+const LoginScreen = ({ onLogin, isFirebaseReady }) => (
+  <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-900 to-blue-700">
+    <div className="bg-white p-10 rounded-2xl shadow-2xl w-full max-w-md">
+      <div className="text-center mb-8">
+        <div className="w-20 h-20 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
+          <span className="text-3xl font-bold text-blue-700">กปภ.</span>
+        </div>
+        <h2 className="text-2xl font-bold text-gray-800">ระบบคุมงบประมาณ</h2>
+        <p className="text-gray-500 text-sm mt-1">การประปาส่วนภูมิภาคสาขาละหานทราย</p>
+      </div>
+      <form onSubmit={onLogin} className="space-y-5">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">อีเมลผู้ใช้งาน</label>
+          <input 
+            type="email" 
+            name="email"
+            defaultValue="admin@pwa.co.th"
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+            required
+          />
+          <p className="text-xs text-gray-400 mt-1">แอดมินเริ่มต้น: admin@pwa.co.th (รหัสผ่านอะไรก็ได้)</p>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">รหัสผ่าน</label>
+          <input 
+            type="password" 
+            name="password"
+            defaultValue="123456"
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+            required
+          />
+        </div>
+        <button 
+          type="submit" 
+          disabled={!isFirebaseReady}
+          className={`w-full text-white font-bold py-3 rounded-lg transition-colors shadow-lg ${isFirebaseReady ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 cursor-not-allowed'}`}
+        >
+          {isFirebaseReady ? 'เข้าสู่ระบบ' : 'กำลังเชื่อมต่อฐานข้อมูล...'}
+        </button>
+      </form>
+    </div>
+  </div>
+);
+
+// 1. DASHBOARD
+const Dashboard = ({ budgets, transactions }) => {
+  const stats = useMemo(() => {
+    let totalAllocated = 0;
+    let totalSpent = 0;
+
+    const chartData = budgets.map(b => {
+      const budgetTransactions = transactions.filter(t => t.budgetCode === b.budgetCode);
+      const spent = budgetTransactions.filter(t => t.type === 'PAYMENT').reduce((sum, t) => sum + parseFloat(t.amount), 0);
+      const received = budgetTransactions.filter(t => t.type === 'RECEIPT').reduce((sum, t) => sum + parseFloat(t.amount), 0);
+      
+      totalAllocated += b.allocatedAmount;
+      totalSpent += spent;
+
+      return {
+        name: b.budgetName,
+        code: b.budgetCode,
+        'งบจัดสรรทั้งหมด': received, // Using total receipts as available budget
+        'เบิกจ่ายแล้ว': spent,
+        'คงเหลือ': received - spent
+      };
+    });
+
+    return { totalAllocated, totalSpent, totalRemaining: totalAllocated - totalSpent, chartData };
+  }, [budgets, transactions]);
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <StatCard title="งบประมาณจัดสรรรวม" amount={stats.totalAllocated} color="bg-blue-500" />
+        <StatCard title="เบิกจ่ายไปแล้วรวม" amount={stats.totalSpent} color="bg-red-500" />
+        <StatCard title="งบประมาณคงเหลือรวม" amount={stats.totalRemaining} color="bg-green-500" />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
+          <h3 className="text-lg font-bold mb-4 text-slate-700">เปรียบเทียบ จัดสรร vs เบิกจ่าย (ตามหมวดบัญชี)</h3>
+          <div className="h-80">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={stats.chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#eee" />
+                <XAxis dataKey="code" tick={{fontSize: 12}} />
+                <YAxis tickFormatter={(value) => new Intl.NumberFormat('th-TH', { notation: "compact" }).format(value)} />
+                <RechartsTooltip formatter={(value) => new Intl.NumberFormat('th-TH').format(value) + ' ฿'} />
+                <Legend />
+                <Bar dataKey="งบจัดสรรทั้งหมด" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="เบิกจ่ายแล้ว" fill="#ef4444" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
+          <h3 className="text-lg font-bold mb-4 text-slate-700">สัดส่วนการเบิกจ่าย</h3>
+          <div className="h-80 flex justify-center items-center">
+             <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie
+                  data={stats.chartData.filter(d => d['เบิกจ่ายแล้ว'] > 0)}
+                  cx="50%"
+                  cy="50%"
+                  innerRadius={60}
+                  outerRadius={100}
+                  paddingAngle={5}
+                  dataKey="เบิกจ่ายแล้ว"
+                  nameKey="name"
+                  label={({name, percent}) => `${name} ${(percent * 100).toFixed(0)}%`}
+                >
+                  {stats.chartData.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                  ))}
+                </Pie>
+                <RechartsTooltip formatter={(value) => new Intl.NumberFormat('th-TH').format(value) + ' ฿'} />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const StatCard = ({ title, amount, color }) => (
+  <div className="bg-white rounded-xl shadow-sm p-6 border border-slate-100 flex items-center space-x-4 relative overflow-hidden">
+    <div className={`absolute left-0 top-0 w-2 h-full ${color}`}></div>
+    <div className="flex-1">
+      <p className="text-sm font-medium text-slate-500 mb-1">{title}</p>
+      <h4 className="text-3xl font-bold text-slate-800">{new Intl.NumberFormat('th-TH').format(amount)} <span className="text-base font-normal text-slate-400">บาท</span></h4>
+    </div>
+  </div>
+);
+
+// --- USER MANAGEMENT COMPONENT ---
+const UserManagement = ({ usersList, firebaseUser, appUser }) => {
+  const [isSaving, setIsSaving] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
+  const [formData, setFormData] = useState({
+    name: '', email: '', role: 'MAKER'
+  });
+
+  const handleChange = (e) => setFormData({ ...formData, [e.target.name]: e.target.value });
+
+  const handleEdit = (u) => {
+    setFormData({ name: u.name, email: u.email, role: u.role });
+    setEditingId(u.id);
+  };
+
+  const cancelEdit = () => {
+    setFormData({ name: '', email: '', role: 'MAKER' });
+    setEditingId(null);
+  };
+
+  const handleSaveUser = async (e) => {
+    e.preventDefault();
+    if (!firebaseUser) return;
+    setIsSaving(true);
+
+    // ตรวจสอบว่าต้องเป็นอีเมลของ กปภ. เท่านั้น ก่อนบันทึกลงฐานข้อมูล
+    if (!formData.email.endsWith('@pwa.co.th')) {
+      alert('กรุณาเพิ่มเฉพาะอีเมลขององค์กร (@pwa.co.th) เท่านั้น');
+      setIsSaving(false);
+      return;
+    }
+
+    try {
+      const userData = {
+        name: formData.name,
+        email: formData.email,
+        role: formData.role,
+        updatedAt: new Date().toISOString()
+      };
+
+      if (editingId) {
+        const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'users', editingId);
+        await updateDoc(userRef, userData);
+        cancelEdit();
+      } else {
+        // เช็คอีเมลซ้ำ
+        if (usersList.some(u => u.email === formData.email)) {
+           alert('อีเมลนี้มีอยู่ในระบบแล้ว');
+           setIsSaving(false);
+           return;
+        }
+
+        const newUserId = Date.now().toString();
+        userData.createdAt = new Date().toISOString();
+        const userRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'users'), newUserId);
+        await setDoc(userRef, userData);
+        cancelEdit();
+      }
+    } catch (error) {
+      console.error("Error saving user:", error);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleDelete = async (id, email) => {
+    if (!firebaseUser) return;
+    if (email === appUser.email) {
+      alert('ไม่สามารถลบตัวเองออกจากระบบได้');
+      setShowDeleteConfirm(null);
+      return;
+    }
+
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', id));
+      setShowDeleteConfirm(null);
+    } catch (error) {
+      console.error("Error deleting user:", error);
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6">
+      <div className="mb-6">
+        <h3 className="text-lg font-bold text-slate-800">{editingId ? 'แก้ไขข้อมูลผู้ใช้งาน' : 'เพิ่มผู้ใช้งานใหม่'}</h3>
+      </div>
+
+      <form onSubmit={handleSaveUser} className={`grid grid-cols-1 md:grid-cols-4 gap-4 mb-8 p-4 rounded-lg border ${editingId ? 'bg-yellow-50 border-yellow-200' : 'bg-blue-50 border-blue-100'}`}>
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">ชื่อ - นามสกุล</label>
+          <input type="text" name="name" value={formData.name} onChange={handleChange} required className="w-full p-2 border rounded text-sm outline-none focus:border-blue-500 bg-white" placeholder="ชื่อพนักงาน" />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">อีเมล (ใช้สำหรับเข้าสู่ระบบ)</label>
+          <input type="email" name="email" value={formData.email} onChange={handleChange} required className="w-full p-2 border rounded text-sm outline-none focus:border-blue-500 bg-white" placeholder="email@pwa.co.th" />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">สิทธิ์การใช้งาน</label>
+          <select name="role" value={formData.role} onChange={handleChange} className="w-full p-2 border rounded text-sm outline-none focus:border-blue-500 bg-white">
+            <option value="MAKER">ผู้จัดทำ (บันทึกข้อมูล/ดูรายงาน)</option>
+            <option value="ADMIN">ผู้ดูแลระบบ (จัดการฐานข้อมูล/ผู้ใช้)</option>
+          </select>
+        </div>
+        <div className="flex items-end space-x-2">
+          {editingId && (
+            <button type="button" onClick={cancelEdit} className="p-2 rounded flex-1 flex justify-center items-center text-slate-600 bg-slate-200 hover:bg-slate-300">
+              ยกเลิก
+            </button>
+          )}
+          <button type="submit" disabled={isSaving} className={`p-2 rounded flex-1 flex justify-center items-center text-white space-x-2 ${isSaving ? 'bg-slate-400' : (editingId ? 'bg-yellow-500 hover:bg-yellow-600' : 'bg-blue-600 hover:bg-blue-700')}`}>
+             <span>{editingId ? 'บันทึกการแก้ไข' : 'เพิ่มผู้ใช้งาน'}</span>
+          </button>
+        </div>
+      </form>
+
+      <h3 className="text-md font-bold text-slate-800 mb-4 border-b pb-2">รายชื่อผู้มีสิทธิ์เข้าใช้งาน</h3>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm text-left">
+          <thead className="bg-slate-100 text-slate-600">
+            <tr>
+              <th className="p-3 rounded-tl-lg">ชื่อ - นามสกุล</th>
+              <th className="p-3">อีเมล</th>
+              <th className="p-3">ระดับสิทธิ์</th>
+              <th className="p-3 text-center rounded-tr-lg w-32">จัดการ</th>
+            </tr>
+          </thead>
+          <tbody>
+            {usersList.length === 0 && <tr><td colSpan="4" className="p-4 text-center text-slate-400">ยังไม่มีผู้ใช้ในระบบ (ใช้แอดมินเริ่มต้น)</td></tr>}
+            {usersList.map((u) => (
+              <tr key={u.id} className="border-b border-slate-50 hover:bg-slate-50">
+                <td className="p-3 font-medium">{u.name}</td>
+                <td className="p-3 text-slate-600">{u.email}</td>
+                <td className="p-3">
+                  <span className={`px-2 py-1 rounded text-xs ${u.role === 'ADMIN' ? 'bg-purple-100 text-purple-700 font-bold' : 'bg-blue-100 text-blue-700'}`}>
+                    {u.role === 'ADMIN' ? 'ผู้ดูแลระบบ' : 'ผู้จัดทำ'}
+                  </span>
+                </td>
+                <td className="p-3 text-center flex justify-center space-x-3 items-center min-h-[48px]">
+                  <button onClick={() => handleEdit(u)} className="text-blue-500 hover:text-blue-700" title="แก้ไข"><Edit size={16}/></button>
+                  {showDeleteConfirm === u.id ? (
+                     <div className="flex items-center space-x-2 bg-red-50 px-2 py-1 rounded">
+                        <button onClick={() => handleDelete(u.id, u.email)} className="text-red-600 font-bold text-xs hover:underline">ยืนยันลบ</button>
+                        <button onClick={() => setShowDeleteConfirm(null)} className="text-slate-500 text-xs hover:underline">ยกเลิก</button>
+                     </div>
+                  ) : (
+                     <button onClick={() => setShowDeleteConfirm(u.id)} className="text-red-400 hover:text-red-600" title="ลบ"><Trash2 size={16}/></button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+
+// 2. BUDGET SETUP (Admin) - Firebase integrated
+const BudgetSetup = ({ budgets, firebaseUser, appUser }) => {
+  const [isSaving, setIsSaving] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
+  const [formData, setFormData] = useState({
+    costCenter: '', budgetCode: '', budgetName: '', amount: '', date: ''
+  });
+
+  const handleChange = (e) => setFormData({ ...formData, [e.target.name]: e.target.value });
+
+  const handleEdit = (b) => {
+    setFormData({
+      costCenter: b.costCenter, budgetCode: b.budgetCode, budgetName: b.budgetName, amount: b.allocatedAmount, date: b.date
+    });
+    setEditingId(b.id);
+  };
+
+  const cancelEdit = () => {
+    setFormData({ costCenter: '', budgetCode: '', budgetName: '', amount: '', date: '' });
+    setEditingId(null);
+  };
+
+  const handleSaveBudget = async (e) => {
+    e.preventDefault();
+    if (!firebaseUser) return;
+    setIsSaving(true);
+
+    try {
+      const budgetData = {
+        costCenter: formData.costCenter,
+        budgetCode: formData.budgetCode,
+        budgetName: formData.budgetName,
+        allocatedAmount: parseFloat(formData.amount),
+        date: formData.date,
+      };
+
+      if (editingId) {
+        // อัปเดตข้อมูลเดิม
+        const budgetRef = doc(db, 'artifacts', appId, 'public', 'data', 'budgets', editingId);
+        await updateDoc(budgetRef, budgetData);
+
+        // อัปเดตยอดยกมาใน Transactions ด้วยให้สอดคล้องกัน
+        const txRef = doc(db, 'artifacts', appId, 'public', 'data', 'transactions', `alloc-${editingId}`);
+        await updateDoc(txRef, {
+          budgetCode: budgetData.budgetCode,
+          date: budgetData.date,
+          amount: budgetData.allocatedAmount,
+        });
+        cancelEdit();
+      } else {
+        // สร้างรายการใหม่
+        const newBudgetId = Date.now().toString();
+        budgetData.createdAt = new Date().toISOString();
+        
+        const budgetRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'budgets'), newBudgetId);
+        await setDoc(budgetRef, budgetData);
+        
+        const txId = `alloc-${newBudgetId}`;
+        const initialTransaction = {
+          budgetCode: budgetData.budgetCode,
+          date: budgetData.date,
+          sequence: '0',
+          description: 'ได้รับงบประมาณจัดสรร (ยอดยกมา)',
+          type: 'RECEIPT',
+          amount: budgetData.allocatedAmount,
+          createdAt: new Date().toISOString()
+        };
+
+        const txRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'transactions'), txId);
+        await setDoc(txRef, initialTransaction);
+        cancelEdit();
+      }
+    } catch (error) {
+      console.error("Error saving budget:", error);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleDelete = async (id) => {
+    if (!firebaseUser) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'budgets', id));
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'transactions', `alloc-${id}`));
+      setShowDeleteConfirm(null);
+    } catch (error) {
+      console.error("Error deleting:", error);
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6">
+      <div className="flex justify-between items-center mb-6">
+        <h3 className="text-lg font-bold text-slate-800">{editingId ? 'แก้ไขรหัสงบประมาณ' : 'เพิ่มรหัสงบประมาณใหม่'}</h3>
+        <button className="flex items-center space-x-2 text-sm bg-slate-100 text-slate-600 px-4 py-2 rounded-lg hover:bg-slate-200">
+          <Upload size={16} /> <span>อัพโหลดเอกสาร (CSV)</span>
+        </button>
+      </div>
+
+      <form onSubmit={handleSaveBudget} className={`grid grid-cols-1 md:grid-cols-5 gap-4 mb-8 p-4 rounded-lg border ${editingId ? 'bg-yellow-50 border-yellow-200' : 'bg-blue-50 border-blue-100'}`}>
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">ศูนย์ต้นทุน</label>
+          <input type="text" name="costCenter" value={formData.costCenter} onChange={handleChange} required className="w-full p-2 border rounded text-sm outline-none focus:border-blue-500 bg-white" placeholder="เช่น 101" />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">รหัสงบประมาณ</label>
+          <input type="text" name="budgetCode" value={formData.budgetCode} onChange={handleChange} required className="w-full p-2 border rounded text-sm outline-none focus:border-blue-500 bg-white" placeholder="เช่น 510101" />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">ชื่องบประมาณ</label>
+          <input type="text" name="budgetName" value={formData.budgetName} onChange={handleChange} required className="w-full p-2 border rounded text-sm outline-none focus:border-blue-500 bg-white" placeholder="ชื่อรายการ..." />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">งบจัดสรร (บาท)</label>
+          <input type="number" name="amount" value={formData.amount} onChange={handleChange} required className="w-full p-2 border rounded text-sm outline-none focus:border-blue-500 bg-white" placeholder="0.00" />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">วันที่ได้รับจัดสรร</label>
+          <div className="flex space-x-2">
+            <input type="date" name="date" value={formData.date} onChange={handleChange} required className="w-full p-2 border rounded text-sm outline-none focus:border-blue-500 bg-white" />
+            {editingId && (
+              <button type="button" onClick={cancelEdit} className="p-2 rounded w-10 flex justify-center items-center text-slate-600 bg-slate-200 hover:bg-slate-300">
+                <X size={18} />
+              </button>
+            )}
+            <button type="submit" disabled={isSaving} className={`p-2 rounded w-12 flex justify-center items-center text-white ${isSaving ? 'bg-slate-400' : (editingId ? 'bg-yellow-500 hover:bg-yellow-600' : 'bg-blue-600 hover:bg-blue-700')}`}>
+              {editingId ? <Edit size={18} /> : <PlusCircle size={20} />}
+            </button>
+          </div>
+        </div>
+      </form>
+
+      <h3 className="text-md font-bold text-slate-800 mb-4 border-b pb-2">ฐานข้อมูลรหัสงบประมาณปัจจุบัน (Cloud)</h3>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm text-left">
+          <thead className="bg-slate-100 text-slate-600">
+            <tr>
+              <th className="p-3 rounded-tl-lg">วันที่</th>
+              <th className="p-3">ศูนย์ต้นทุน</th>
+              <th className="p-3">รหัสงบ</th>
+              <th className="p-3">ชื่อรายการ</th>
+              <th className="p-3 text-right">งบจัดสรร (บาท)</th>
+              {appUser.role === 'ADMIN' && <th className="p-3 text-center rounded-tr-lg w-32">จัดการ</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {budgets.length === 0 && <tr><td colSpan={appUser.role === 'ADMIN' ? 6 : 5} className="p-4 text-center text-slate-400">ยังไม่มีข้อมูลในฐานข้อมูล</td></tr>}
+            {budgets.map((b) => (
+              <tr key={b.id} className="border-b border-slate-50 hover:bg-slate-50">
+                <td className="p-3">{b.date}</td>
+                <td className="p-3 font-mono">{b.costCenter}</td>
+                <td className="p-3 font-mono font-semibold text-blue-600">{b.budgetCode}</td>
+                <td className="p-3">{b.budgetName}</td>
+                <td className="p-3 text-right font-medium">{new Intl.NumberFormat('th-TH').format(b.allocatedAmount)}</td>
+                {appUser.role === 'ADMIN' && (
+                  <td className="p-3 text-center flex justify-center space-x-3 items-center min-h-[48px]">
+                    <button onClick={() => handleEdit(b)} className="text-blue-500 hover:text-blue-700" title="แก้ไข"><Edit size={16}/></button>
+                    {showDeleteConfirm === b.id ? (
+                       <div className="flex items-center space-x-2 bg-red-50 px-2 py-1 rounded">
+                          <button onClick={() => handleDelete(b.id)} className="text-red-600 font-bold text-xs hover:underline">ยืนยันลบ</button>
+                          <button onClick={() => setShowDeleteConfirm(null)} className="text-slate-500 text-xs hover:underline">ยกเลิก</button>
+                       </div>
+                    ) : (
+                       <button onClick={() => setShowDeleteConfirm(b.id)} className="text-red-400 hover:text-red-600" title="ลบ"><Trash2 size={16}/></button>
+                    )}
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+// 3. TRANSACTION ENTRY - Firebase integrated
+const TransactionEntry = ({ budgets, transactions, firebaseUser, appUser }) => {
+  const [selectedCode, setSelectedCode] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+  const [editingTxId, setEditingTxId] = useState(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
+
+  const [formData, setFormData] = useState({
+    date: '', sequence: '', description: '', type: 'PAYMENT', amount: ''
+  });
+
+  const handleChange = (e) => setFormData({ ...formData, [e.target.name]: e.target.value });
+
+  // Filter budgets for dropdown search
+  const filteredBudgets = budgets.filter(b => 
+    b.budgetCode.includes(searchTerm) || b.budgetName.includes(searchTerm)
+  );
+
+  const selectedBudget = budgets.find(b => b.budgetCode === selectedCode);
+
+  // Calculate ledger with running balance (sorted manually in memory as per rules)
+  const ledger = useMemo(() => {
+    if (!selectedCode) return [];
+    
+    let runningBalance = 0;
+    const items = transactions
+      .filter(t => t.budgetCode === selectedCode)
+      .sort((a, b) => new Date(a.date) - new Date(b.date) || parseInt(a.sequence) - parseInt(b.sequence) || a.createdAt?.localeCompare(b.createdAt));
+
+    return items.map(item => {
+      const receipt = item.type === 'RECEIPT' ? parseFloat(item.amount) : 0;
+      const payment = item.type === 'PAYMENT' ? parseFloat(item.amount) : 0;
+      runningBalance = runningBalance + receipt - payment;
+      return { ...item, receipt, payment, balance: runningBalance };
+    });
+  }, [transactions, selectedCode]);
+
+  const currentBalance = ledger.length > 0 ? ledger[ledger.length - 1].balance : 0;
+
+  const handleEditTx = (tx) => {
+    if(tx.id.startsWith('alloc-')) return; // ป้องกันการแก้รายการจัดสรรเริ่มต้นที่หน้านี้
+    setFormData({
+      date: tx.date, sequence: tx.sequence, description: tx.description, type: tx.type, amount: tx.amount
+    });
+    setEditingTxId(tx.id);
+  };
+
+  const cancelEditTx = () => {
+    setFormData({ date: '', sequence: '', description: '', type: 'PAYMENT', amount: '' });
+    setEditingTxId(null);
+  };
+
+  const handleSaveTransaction = async (e) => {
+    e.preventDefault();
+    if (!firebaseUser) return;
+    setIsSaving(true);
+
+    try {
+      const txData = {
+        budgetCode: selectedCode,
+        date: formData.date,
+        sequence: formData.sequence,
+        description: formData.description,
+        type: formData.type,
+        amount: parseFloat(formData.amount),
+      };
+
+      if (editingTxId) {
+        const txRef = doc(db, 'artifacts', appId, 'public', 'data', 'transactions', editingTxId);
+        await updateDoc(txRef, txData);
+        cancelEditTx();
+      } else {
+        const newTxId = Date.now().toString();
+        txData.createdAt = new Date().toISOString();
+        const txRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'transactions'), newTxId);
+        await setDoc(txRef, txData);
+        cancelEditTx();
+      }
+    } catch (error) {
+      console.error("Error saving transaction:", error);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleDeleteTx = async (id) => {
+    if (!firebaseUser) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'transactions', id));
+      setShowDeleteConfirm(null);
+    } catch (error) {
+      console.error("Error deleting:", error);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Selector Area */}
+      <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
+        <label className="block text-sm font-bold text-slate-700 mb-2">ค้นหาและเลือกรหัสงบประมาณเพื่อคีย์ข้อมูล</label>
+        <div className="relative">
+          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+            <Search size={18} className="text-slate-400" />
+          </div>
+          <input 
+            type="text" 
+            placeholder="พิมพ์รหัสหรือชื่องบประมาณ..." 
+            className="w-full pl-10 pr-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+          />
+        </div>
+        
+        {searchTerm && !selectedBudget && (
+          <div className="mt-2 border border-slate-200 rounded-lg shadow-lg max-h-48 overflow-y-auto absolute z-50 bg-white w-full max-w-2xl">
+            {filteredBudgets.map(b => (
+              <div 
+                key={b.id} 
+                className="p-3 hover:bg-blue-50 cursor-pointer border-b last:border-b-0 flex justify-between"
+                onClick={() => { setSelectedCode(b.budgetCode); setSearchTerm(''); }}
+              >
+                <span className="font-medium text-blue-700">{b.budgetCode}</span>
+                <span className="text-slate-600">{b.budgetName}</span>
+              </div>
+            ))}
+            {filteredBudgets.length === 0 && <div className="p-3 text-slate-500">ไม่พบรหัสงบประมาณที่ค้นหา</div>}
+          </div>
+        )}
+
+        {/* Selected Budget Info Pills */}
+        {selectedBudget && (
+          <div className="mt-4 flex flex-wrap gap-3">
+            <div className="bg-blue-50 text-blue-800 px-4 py-2 rounded-lg text-sm border border-blue-100 flex items-center">
+              <span className="font-bold mr-2">รหัส:</span> {selectedBudget.budgetCode}
+            </div>
+            <div className="bg-blue-50 text-blue-800 px-4 py-2 rounded-lg text-sm border border-blue-100 flex items-center">
+              <span className="font-bold mr-2">ชื่อ:</span> {selectedBudget.budgetName}
+            </div>
+            <div className="bg-green-50 text-green-800 px-4 py-2 rounded-lg text-sm border border-green-100 flex items-center ml-auto shadow-sm">
+              <span className="font-bold mr-2">ยอดคงเหลือปัจจุบัน:</span> 
+              <span className="text-lg">{new Intl.NumberFormat('th-TH').format(currentBalance)} ฿</span>
+            </div>
+            <button onClick={() => setSelectedCode('')} className="text-sm text-slate-500 hover:text-red-500 underline ml-2">เปลี่ยนรหัส</button>
+          </div>
+        )}
+      </div>
+
+      {selectedCode && (
+        <>
+          {/* Data Entry Form */}
+          <div className={`bg-white p-6 rounded-xl shadow-sm border border-l-4 ${editingTxId ? 'border-yellow-200 border-l-yellow-500 bg-yellow-50/30' : 'border-slate-100 border-l-blue-500'}`}>
+            <h3 className="text-md font-bold text-slate-800 mb-4">{editingTxId ? 'แก้ไขข้อมูลรายการ' : 'คีย์ข้อมูลรายการใหม่ (บันทึกขึ้น Cloud ทันที)'}</h3>
+            <form onSubmit={handleSaveTransaction} className="grid grid-cols-1 md:grid-cols-6 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">วันที่</label>
+                <input type="date" name="date" value={formData.date} onChange={handleChange} required className="w-full p-2 border rounded text-sm outline-none focus:border-blue-500 bg-white" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">ลำดับที่</label>
+                <input type="text" name="sequence" value={formData.sequence} onChange={handleChange} required className="w-full p-2 border rounded text-sm outline-none focus:border-blue-500 bg-white" placeholder="อ้างอิงเอกสาร" />
+              </div>
+              <div className="md:col-span-2">
+                <label className="block text-xs font-medium text-slate-600 mb-1">รายการ/รายละเอียด</label>
+                <input type="text" name="description" value={formData.description} onChange={handleChange} required className="w-full p-2 border rounded text-sm outline-none focus:border-blue-500 bg-white" placeholder="รายละเอียดการรับ/จ่าย" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">ประเภท</label>
+                <select name="type" value={formData.type} onChange={handleChange} className="w-full p-2 border rounded text-sm outline-none focus:border-blue-500 bg-white">
+                  <option value="PAYMENT">จ่ายตัดงบ (-)</option>
+                  <option value="RECEIPT">รับเพิ่ม/โอนมา (+)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">จำนวนเงิน</label>
+                <div className="flex space-x-2">
+                  <input type="number" name="amount" value={formData.amount} onChange={handleChange} required min="0.01" step="0.01" className="w-full p-2 border rounded text-sm outline-none focus:border-blue-500 bg-white" placeholder="0.00" />
+                  {editingTxId && (
+                    <button type="button" onClick={cancelEditTx} className="p-2 rounded w-10 flex justify-center items-center text-slate-600 bg-slate-200 hover:bg-slate-300">
+                      <X size={18} />
+                    </button>
+                  )}
+                  <button type="submit" disabled={isSaving} className={`p-2 rounded w-12 flex justify-center items-center text-white ${isSaving ? 'bg-slate-400' : (editingTxId ? 'bg-yellow-500 hover:bg-yellow-600' : 'bg-blue-600 hover:bg-blue-700')}`}>
+                    {editingTxId ? <Edit size={18} /> : <PlusCircle size={18} />}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+
+          {/* Ledger Table */}
+          <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+            <div className="p-4 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
+               <h3 className="text-md font-bold text-slate-800">บัญชีแยกประเภท: {selectedBudget.budgetCode}</h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm text-left">
+                <thead className="bg-blue-900 text-white">
+                  <tr>
+                    <th className="p-3 w-24">วันที่</th>
+                    <th className="p-3 w-20">ลำดับ</th>
+                    <th className="p-3">รายการ</th>
+                    <th className="p-3 text-right w-32 bg-green-700/50">รับ (+)</th>
+                    <th className="p-3 text-right w-32 bg-red-700/50">จ่าย (-)</th>
+                    <th className="p-3 text-right w-36 font-bold">ยอดคงเหลือ</th>
+                    {appUser.role === 'ADMIN' && <th className="p-3 text-center w-28">จัดการ</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {ledger.map((row, idx) => (
+                    <tr key={row.id} className="border-b border-slate-100 hover:bg-slate-50">
+                      <td className="p-3 text-slate-600">{row.date}</td>
+                      <td className="p-3 text-center">{row.sequence}</td>
+                      <td className="p-3">{row.description}</td>
+                      <td className="p-3 text-right text-green-600">{row.receipt > 0 ? new Intl.NumberFormat('th-TH').format(row.receipt) : '-'}</td>
+                      <td className="p-3 text-right text-red-500">{row.payment > 0 ? new Intl.NumberFormat('th-TH').format(row.payment) : '-'}</td>
+                      <td className="p-3 text-right font-bold text-slate-800 bg-slate-50/50">{new Intl.NumberFormat('th-TH').format(row.balance)}</td>
+                      {appUser.role === 'ADMIN' && (
+                        <td className="p-3 text-center h-[48px]">
+                          {!row.id.startsWith('alloc-') && (
+                            <div className="flex justify-center space-x-3 items-center">
+                               <button onClick={() => handleEditTx(row)} className="text-blue-500 hover:text-blue-700" title="แก้ไข"><Edit size={16}/></button>
+                               {showDeleteConfirm === row.id ? (
+                                  <div className="flex flex-col items-center bg-red-50 px-1 py-1 rounded">
+                                     <button onClick={() => handleDeleteTx(row.id)} className="text-red-600 font-bold text-[10px] leading-tight hover:underline">ลบเลย</button>
+                                     <button onClick={() => setShowDeleteConfirm(null)} className="text-slate-500 text-[10px] leading-tight hover:underline">ยกเลิก</button>
+                                  </div>
+                               ) : (
+                                  <button onClick={() => setShowDeleteConfirm(row.id)} className="text-red-400 hover:text-red-600" title="ลบ"><Trash2 size={16}/></button>
+                               )}
+                            </div>
+                          )}
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                  {ledger.length === 0 && (
+                    <tr><td colSpan={appUser.role === 'ADMIN' ? 7 : 6} className="p-6 text-center text-slate-400">ยังไม่มีข้อมูลการเคลื่อนไหว</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
+// 4. REPORTS
+const Reports = ({ budgets, transactions, exportToCSV }) => {
+  const [reportType, setReportType] = useState('SUMMARY'); // SUMMARY or DETAIL
+  const [filterCode, setFilterCode] = useState('ALL');
+
+  const summaryData = useMemo(() => {
+    return budgets.map(b => {
+      const txs = transactions.filter(t => t.budgetCode === b.budgetCode);
+      const totalReceipts = txs.filter(t => t.type === 'RECEIPT').reduce((sum, t) => sum + parseFloat(t.amount), 0);
+      const totalPayments = txs.filter(t => t.type === 'PAYMENT').reduce((sum, t) => sum + parseFloat(t.amount), 0);
+      return {
+        code: b.budgetCode,
+        name: b.budgetName,
+        allocated: b.allocatedAmount, // Original Allocation
+        totalReceipts, // Total including allocation + external transfers
+        totalPayments,
+        balance: totalReceipts - totalPayments
+      };
+    });
+  }, [budgets, transactions]);
+
+  const detailData = useMemo(() => {
+    let data = transactions.map(t => {
+      const budget = budgets.find(b => b.budgetCode === t.budgetCode);
+      return { ...t, budgetName: budget ? budget.budgetName : 'Unknown' };
+    });
+    if (filterCode !== 'ALL') {
+      data = data.filter(d => d.budgetCode === filterCode);
+    }
+    return data.sort((a, b) => new Date(b.date) - new Date(a.date) || a.createdAt?.localeCompare(b.createdAt));
+  }, [transactions, budgets, filterCode]);
+
+  const handleCSVExport = () => {
+    if (reportType === 'SUMMARY') {
+      const csvData = [
+        ["รหัสบัญชี", "ชื่องบประมาณ", "งบจัดสรรเริ่มแรก", "รวมรับ", "รวมจ่าย", "คงเหลือ"],
+        ...summaryData.map(r => [r.code, r.name, r.allocated, r.totalReceipts, r.totalPayments, r.balance])
+      ];
+      exportToCSV(csvData, "รายงานสรุปงบประมาณ");
+    } else {
+      const csvData = [
+        ["วันที่", "รหัสบัญชี", "ชื่องบประมาณ", "ลำดับ", "รายการ", "ประเภท", "จำนวนเงิน"],
+        ...detailData.map(r => [r.date, r.budgetCode, r.budgetName, r.sequence, r.description, r.type === 'RECEIPT' ? 'รับ' : 'จ่าย', r.amount])
+      ];
+      exportToCSV(csvData, "รายงานรายละเอียดรับจ่าย");
+    }
+  };
+
+  const handlePrint = () => {
+    window.print();
+  };
+
+  return (
+    <div className="space-y-6 print:m-0 print:p-0">
+      {/* Controls (Hidden in Print) */}
+      <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 flex flex-wrap justify-between items-center gap-4 print:hidden">
+        <div className="flex space-x-2">
+          <button 
+            onClick={() => setReportType('SUMMARY')}
+            className={`px-4 py-2 rounded-lg text-sm font-medium ${reportType === 'SUMMARY' ? 'bg-blue-900 text-white' : 'bg-slate-100 text-slate-600'}`}
+          >
+            รายงานสรุปแยกตามหมวด
+          </button>
+          <button 
+            onClick={() => setReportType('DETAIL')}
+            className={`px-4 py-2 rounded-lg text-sm font-medium ${reportType === 'DETAIL' ? 'bg-blue-900 text-white' : 'bg-slate-100 text-slate-600'}`}
+          >
+            รายงานรายละเอียดรายวัน/เดือน
+          </button>
+        </div>
+
+        {reportType === 'DETAIL' && (
+          <select 
+            value={filterCode} 
+            onChange={(e) => setFilterCode(e.target.value)}
+            className="p-2 border rounded-lg text-sm outline-none bg-white min-w-[200px]"
+          >
+            <option value="ALL">ทุกหมวดบัญชี</option>
+            {budgets.map(b => <option key={b.id} value={b.budgetCode}>{b.budgetCode} - {b.budgetName}</option>)}
+          </select>
+        )}
+
+        <div className="flex space-x-2">
+          <button onClick={handleCSVExport} className="flex items-center space-x-2 bg-green-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-green-700">
+            <FileSpreadsheet size={16} /> <span>ดาวน์โหลด Excel/CSV</span>
+          </button>
+          <button onClick={handlePrint} className="flex items-center space-x-2 bg-red-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-red-700">
+            <Printer size={16} /> <span>ดาวน์โหลด PDF / พิมพ์</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Printable Area */}
+      <div className="bg-white p-8 rounded-xl shadow-sm border border-slate-100 print:shadow-none print:border-none print:p-0">
+        <div className="text-center mb-6 hidden print:block">
+          <h1 className="text-xl font-bold">การประปาส่วนภูมิภาคสาขาละหานทราย</h1>
+          <h2 className="text-lg mt-1">
+            {reportType === 'SUMMARY' ? 'รายงานสรุปการคุมงบประมาณรายรับ-รายจ่าย แยกตามหมวดรหัสบัญชี' : 'รายงานรายละเอียดการเบิกจ่ายงบประมาณ'}
+          </h2>
+          <p className="text-sm text-slate-500 mt-2">พิมพ์วันที่: {new Date().toLocaleDateString('th-TH')}</p>
+        </div>
+
+        {reportType === 'SUMMARY' ? (
+          <table className="w-full text-sm text-left border-collapse">
+            <thead className="bg-slate-100 text-slate-800 print:bg-slate-200">
+              <tr>
+                <th className="p-3 border border-slate-200">รหัสงบ</th>
+                <th className="p-3 border border-slate-200">ชื่อหมวดงบประมาณ</th>
+                <th className="p-3 border border-slate-200 text-right bg-blue-50">งบจัดสรร (อ้างอิง)</th>
+                <th className="p-3 border border-slate-200 text-right">รวมรับสะสม (+)</th>
+                <th className="p-3 border border-slate-200 text-right">รวมจ่ายสะสม (-)</th>
+                <th className="p-3 border border-slate-200 text-right font-bold bg-green-50">คงเหลือสุทธิ</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summaryData.length === 0 && <tr><td colSpan="6" className="p-4 text-center text-slate-400">ยังไม่มีข้อมูล</td></tr>}
+              {summaryData.map(row => (
+                <tr key={row.code} className="hover:bg-slate-50">
+                  <td className="p-3 border border-slate-200 font-mono text-center">{row.code}</td>
+                  <td className="p-3 border border-slate-200">{row.name}</td>
+                  <td className="p-3 border border-slate-200 text-right text-slate-500">{new Intl.NumberFormat('th-TH').format(row.allocated)}</td>
+                  <td className="p-3 border border-slate-200 text-right text-green-600">{new Intl.NumberFormat('th-TH').format(row.totalReceipts)}</td>
+                  <td className="p-3 border border-slate-200 text-right text-red-600">{new Intl.NumberFormat('th-TH').format(row.totalPayments)}</td>
+                  <td className="p-3 border border-slate-200 text-right font-bold">{new Intl.NumberFormat('th-TH').format(row.balance)}</td>
+                </tr>
+              ))}
+              {/* Totals Footer */}
+              {summaryData.length > 0 && (
+                <tr className="bg-slate-50 font-bold">
+                  <td colSpan="2" className="p-3 border border-slate-200 text-right">รวมทั้งสิ้น:</td>
+                  <td className="p-3 border border-slate-200 text-right">{new Intl.NumberFormat('th-TH').format(summaryData.reduce((s,r)=>s+r.allocated,0))}</td>
+                  <td className="p-3 border border-slate-200 text-right">{new Intl.NumberFormat('th-TH').format(summaryData.reduce((s,r)=>s+r.totalReceipts,0))}</td>
+                  <td className="p-3 border border-slate-200 text-right">{new Intl.NumberFormat('th-TH').format(summaryData.reduce((s,r)=>s+r.totalPayments,0))}</td>
+                  <td className="p-3 border border-slate-200 text-right">{new Intl.NumberFormat('th-TH').format(summaryData.reduce((s,r)=>s+r.balance,0))}</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        ) : (
+          <table className="w-full text-sm text-left border-collapse">
+            <thead className="bg-slate-100 text-slate-800 print:bg-slate-200">
+              <tr>
+                <th className="p-3 border border-slate-200 w-24">วันที่</th>
+                <th className="p-3 border border-slate-200">รหัสบัญชี</th>
+                <th className="p-3 border border-slate-200 w-16 text-center">ลำดับ</th>
+                <th className="p-3 border border-slate-200">รายการ</th>
+                <th className="p-3 border border-slate-200 text-center w-20">ประเภท</th>
+                <th className="p-3 border border-slate-200 text-right w-32">จำนวนเงิน</th>
+              </tr>
+            </thead>
+            <tbody>
+              {detailData.length === 0 && <tr><td colSpan="6" className="p-4 text-center text-slate-400">ยังไม่มีข้อมูล</td></tr>}
+              {detailData.map(row => (
+                <tr key={row.id} className="hover:bg-slate-50">
+                  <td className="p-3 border border-slate-200">{row.date}</td>
+                  <td className="p-3 border border-slate-200 font-mono text-sm">
+                    {row.budgetCode} <br/><span className="text-xs text-slate-400">{row.budgetName}</span>
+                  </td>
+                  <td className="p-3 border border-slate-200 text-center">{row.sequence}</td>
+                  <td className="p-3 border border-slate-200">{row.description}</td>
+                  <td className="p-3 border border-slate-200 text-center">
+                    <span className={`px-2 py-1 rounded text-xs ${row.type === 'RECEIPT' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                      {row.type === 'RECEIPT' ? 'รับ' : 'จ่าย'}
+                    </span>
+                  </td>
+                  <td className={`p-3 border border-slate-200 text-right font-medium ${row.type === 'RECEIPT' ? 'text-green-600' : 'text-red-500'}`}>
+                    {new Intl.NumberFormat('th-TH').format(row.amount)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+};
